@@ -1,8 +1,9 @@
 import StatusBadge from "./StatusBadge";
+import PhBadge from "./PhBadge";
 import { formatDate } from "../utils/waterUtils";
 
 /**
- * Data table for water quality history
+ * Data table for water quality history (turbidity + pH)
  */
 const DataTable = ({ data = [], onDelete, loading }) => {
   if (loading) {
@@ -32,46 +33,59 @@ const DataTable = ({ data = [], onDelete, loading }) => {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-gray-200 dark:border-gray-700">
-            <th className="text-left py-3 px-4 font-semibold text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
-              #
-            </th>
-            <th className="text-left py-3 px-4 font-semibold text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
-              Turbidity (NTU)
-            </th>
-            <th className="text-left py-3 px-4 font-semibold text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
-              Status
-            </th>
-            <th className="text-left py-3 px-4 font-semibold text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
-              Waktu
-            </th>
-            {onDelete && (
-              <th className="text-left py-3 px-4 font-semibold text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
-                Aksi
-              </th>
-            )}
+            {["#", "Turbidity (NTU)", "Status Air", "pH", "Status pH", "Waktu", onDelete && "Aksi"]
+              .filter(Boolean)
+              .map((h) => (
+                <th key={h} className="text-left py-3 px-4 font-semibold text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider whitespace-nowrap">
+                  {h}
+                </th>
+              ))}
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
           {data.map((row, index) => (
-            <tr
-              key={row.id}
-              className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors"
-            >
-              <td className="py-3 px-4 text-gray-400 dark:text-gray-500 text-xs">
-                {index + 1}
-              </td>
+            <tr key={row.id} className="hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors">
+              {/* # */}
+              <td className="py-3 px-4 text-gray-400 dark:text-gray-500 text-xs">{index + 1}</td>
+
+              {/* Turbidity */}
               <td className="py-3 px-4">
                 <span className="font-semibold text-gray-900 dark:text-white">
                   {parseFloat(row.turbidity).toFixed(2)}
                 </span>
                 <span className="text-gray-400 dark:text-gray-500 ml-1 text-xs">NTU</span>
               </td>
+
+              {/* Status turbidity */}
               <td className="py-3 px-4">
                 <StatusBadge status={row.status} size="sm" />
               </td>
-              <td className="py-3 px-4 text-gray-500 dark:text-gray-400 text-xs">
+
+              {/* pH value */}
+              <td className="py-3 px-4">
+                {row.ph !== null && row.ph !== undefined ? (
+                  <>
+                    <span className="font-semibold text-gray-900 dark:text-white">
+                      {parseFloat(row.ph).toFixed(2)}
+                    </span>
+                    <span className="text-gray-400 dark:text-gray-500 ml-1 text-xs">pH</span>
+                  </>
+                ) : (
+                  <span className="text-gray-400 dark:text-gray-500 text-xs">—</span>
+                )}
+              </td>
+
+              {/* pH status */}
+              <td className="py-3 px-4">
+                <PhBadge phStatus={row.ph_status} size="sm" />
+              </td>
+
+              {/* Waktu */}
+              <td className="py-3 px-4 text-gray-500 dark:text-gray-400 text-xs whitespace-nowrap">
                 {formatDate(row.created_at)}
               </td>
+
+              {/* Aksi */}
               {onDelete && (
                 <td className="py-3 px-4">
                   <button

@@ -1,43 +1,34 @@
 /**
  * ============================================================
  * IoT Water Quality Monitor — ESP32
+ * Sensor: Turbidity + pH
  * ============================================================
- * Sensor  : Turbidity Sensor (Analog)
- * Board   : ESP32 DevKit V1
- * Library : WiFi.h, HTTPClient.h (built-in ESP32)
  *
  * Wiring:
- *   Turbidity Sensor VCC  → 5V
- *   Turbidity Sensor GND  → GND
- *   Turbidity Sensor OUT  → GPIO 34 (ADC1_CH6)
+ *   Turbidity Sensor OUT → GPIO 34 (ADC1_CH6)
+ *   pH Sensor OUT        → GPIO 35 (ADC1_CH7)
+ *   Semua VCC → 5V, GND → GND
  *
+ * Library: ArduinoJson (install via Library Manager)
  * ============================================================
  */
 
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <ArduinoJson.h>   // Install via Library Manager: ArduinoJson by Benoit Blanchon
+#include <ArduinoJson.h>
 
-// ─── Configuration ────────────────────────────────────────────
-const char* WIFI_SSID     = "YOUR_WIFI_SSID";       // Ganti dengan SSID WiFi Anda
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";   // Ganti dengan password WiFi Anda
+// ─── Konfigurasi ──────────────────────────────────────────────
+const char* WIFI_SSID      = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD  = "YOUR_WIFI_PASSWORD";
+const char* SERVER_URL     = "http://192.168.1.100:5000/api/water/add";
 
-const char* SERVER_URL    = "http://192.168.1.100:5000/api/water/add"; // Ganti dengan IP server Anda
-
-const int   SENSOR_PIN    = 34;    // GPIO pin untuk sensor turbidity
-const int   READ_INTERVAL = 5000;  // Interval pembacaan: 5 detik
-const int   ADC_SAMPLES   = 10;    // Jumlah sampel untuk rata-rata ADC
+const int   TURBIDITY_PIN  = 34;   // GPIO ADC untuk turbidity
+const int   PH_PIN         = 35;   // GPIO ADC untuk pH
+const int   READ_INTERVAL  = 5000; // Interval 5 detik
+const int   ADC_SAMPLES    = 10;   // Sampel rata-rata ADC
 
 // ─── Global Variables ─────────────────────────────────────────
 unsigned long lastReadTime = 0;
-bool wifiConnected = false;
-
-// ─── Function Declarations ────────────────────────────────────
-float readTurbidity();
-float adcToNTU(int adcValue);
-void  connectWiFi();
-bool  sendData(float turbidity);
-void  printStatus(float turbidity, bool sent);
 
 // ─── Setup ────────────────────────────────────────────────────
 void setup() {
@@ -46,88 +37,120 @@ void setup() {
 
   Serial.println("\n========================================");
   Serial.println("  IoT Water Quality Monitor — ESP32");
+  Serial.println("  Sensor: Turbidity + pH");
   Serial.println("========================================\n");
 
-  // Configure ADC
-  analogReadResolution(12);       // 12-bit ADC (0–4095)
-  analogSetAttenuation(ADC_11db); // Full range: 0–3.3V
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
 
-  // Connect to WiFi
   connectWiFi();
 }
 
 // ─── Main Loop ────────────────────────────────────────────────
 void loop() {
-  unsigned long currentTime = millis();
-
-  // Reconnect WiFi if disconnected
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("⚠️  WiFi disconnected. Reconnecting...");
     connectWiFi();
   }
 
-  // Read and send data at interval
-  if (currentTime - lastReadTime >= READ_INTERVAL) {
-    lastReadTime = currentTime;
+  if (millis() - lastReadTime >= READ_INTERVAL) {
+    lastReadTime = millis();
 
     float turbidity = readTurbidity();
-    bool sent = sendData(turbidity);
-    printStatus(turbidity, sent);
+    float ph        = readPH();
+    bool  sent      = sendData(turbidity, ph);
+
+    printStatus(turbidity, ph, sent);
   }
 }
 
-// ─── Read Turbidity Sensor ────────────────────────────────────
-/**
- * Reads multiple ADC samples and returns average turbidity in NTU
- */
+// ─── Read Turbidity ───────────────────────────────────────────
 float readTurbidity() {
   long sum = 0;
-
   for (int i = 0; i < ADC_SAMPLES; i++) {
-    sum += analogRead(SENSOR_PIN);
+    sum += analogRead(TURBIDITY_PIN);
     delay(10);
   }
-
   int avgADC = sum / ADC_SAMPLES;
-  float ntu  = adcToNTU(avgADC);
-
-  Serial.printf("📊 ADC Raw: %d | Turbidity: %.2f NTU\n", avgADC, ntu);
-  return ntu;
+  return adcToNTU(avgADC);
 }
 
-// ─── ADC to NTU Conversion ────────────────────────────────────
-/**
- * Convert ADC value (0–4095) to NTU
- *
- * Calibration formula based on typical turbidity sensor:
- * - Clear water (low turbidity) → high voltage → high ADC
- * - Turbid water (high turbidity) → low voltage → low ADC
- *
- * Adjust the formula based on your specific sensor calibration.
- * Formula: NTU = -1120.4 * (voltage^2) + 5742.3 * voltage - 4352.9
- */
 float adcToNTU(int adcValue) {
-  // Convert ADC to voltage (3.3V reference, 12-bit)
   float voltage = adcValue * (3.3f / 4095.0f);
-
   float ntu;
 
-  if (voltage < 2.5f) {
-    // High turbidity range
-    ntu = 3000.0f;
-  } else if (voltage > 4.2f) {
-    // Very clear water
-    ntu = 0.0f;
-  } else {
-    // Polynomial calibration curve
-    ntu = -1120.4f * (voltage * voltage) + 5742.3f * voltage - 4352.9f;
+  if (voltage < 2.5f)      ntu = 3000.0f;
+  else if (voltage > 4.2f) ntu = 0.0f;
+  else                     ntu = -1120.4f * (voltage * voltage) + 5742.3f * voltage - 4352.9f;
+
+  return constrain(ntu, 0.0f, 3000.0f);
+}
+
+// ─── Read pH ──────────────────────────────────────────────────
+/**
+ * Membaca sensor pH analog
+ *
+ * Kalibrasi umum sensor pH analog (modul pH-4502C):
+ *   Voltage 2.5V = pH 7.0 (netral)
+ *   Setiap 0.18V perubahan ≈ 1 unit pH
+ *
+ * Formula: pH = 7.0 + ((2.5 - voltage) / 0.18)
+ *
+ * Catatan: Kalibrasi bisa berbeda per sensor.
+ * Gunakan larutan buffer pH 4, 7, 10 untuk kalibrasi akurat.
+ */
+float readPH() {
+  long sum = 0;
+  for (int i = 0; i < ADC_SAMPLES; i++) {
+    sum += analogRead(PH_PIN);
+    delay(10);
+  }
+  int avgADC = sum / ADC_SAMPLES;
+  return adcToPH(avgADC);
+}
+
+float adcToPH(int adcValue) {
+  // Konversi ADC ke voltage (3.3V referensi, 12-bit)
+  float voltage = adcValue * (3.3f / 4095.0f);
+
+  // Kalibrasi: pH 7 = 2.5V, slope = 0.18V/pH
+  float ph = 7.0f + ((2.5f - voltage) / 0.18f);
+
+  // Clamp ke range valid 0–14
+  return constrain(ph, 0.0f, 14.0f);
+}
+
+// ─── Send Data to Server ──────────────────────────────────────
+bool sendData(float turbidity, float ph) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ Cannot send: WiFi not connected");
+    return false;
   }
 
-  // Clamp to valid range
-  if (ntu < 0.0f)    ntu = 0.0f;
-  if (ntu > 3000.0f) ntu = 3000.0f;
+  HTTPClient http;
+  http.begin(SERVER_URL);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(5000);
 
-  return ntu;
+  // Build JSON payload dengan turbidity + pH
+  StaticJsonDocument<128> doc;
+  doc["turbidity"] = turbidity;
+  doc["ph"]        = ph;
+
+  String payload;
+  serializeJson(doc, payload);
+
+  int httpCode = http.POST(payload);
+  bool success = (httpCode == 201);
+
+  if (httpCode > 0) {
+    Serial.printf("%s HTTP %d\n", success ? "✅ Sent!" : "⚠️  Server:", httpCode);
+  } else {
+    Serial.printf("❌ HTTP error: %s\n", http.errorToString(httpCode).c_str());
+  }
+
+  http.end();
+  return success;
 }
 
 // ─── WiFi Connection ──────────────────────────────────────────
@@ -143,73 +166,23 @@ void connectWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
     Serial.println("\n✅ WiFi connected!");
-    Serial.printf("   IP Address : %s\n", WiFi.localIP().toString().c_str());
-    Serial.printf("   Signal     : %d dBm\n\n", WiFi.RSSI());
+    Serial.printf("   IP: %s | RSSI: %d dBm\n\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
   } else {
-    wifiConnected = false;
-    Serial.println("\n❌ WiFi connection failed! Will retry...\n");
+    Serial.println("\n❌ WiFi failed! Retrying later...\n");
   }
 }
 
-// ─── Send Data to Server ──────────────────────────────────────
-/**
- * Sends turbidity data to Node.js REST API via HTTP POST
- * Returns true if successful
- */
-bool sendData(float turbidity) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ Cannot send: WiFi not connected");
-    return false;
-  }
-
-  HTTPClient http;
-  http.begin(SERVER_URL);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(5000); // 5 second timeout
-
-  // Build JSON payload
-  StaticJsonDocument<128> doc;
-  doc["turbidity"] = turbidity;
-
-  String payload;
-  serializeJson(doc, payload);
-
-  // Send POST request
-  int httpCode = http.POST(payload);
-
-  bool success = false;
-
-  if (httpCode > 0) {
-    String response = http.getString();
-
-    if (httpCode == 201) {
-      success = true;
-      Serial.printf("✅ Data sent! HTTP %d\n", httpCode);
-    } else {
-      Serial.printf("⚠️  Server responded: HTTP %d — %s\n", httpCode, response.c_str());
-    }
-  } else {
-    Serial.printf("❌ HTTP request failed: %s\n", http.errorToString(httpCode).c_str());
-  }
-
-  http.end();
-  return success;
-}
-
-// ─── Print Status to Serial Monitor ──────────────────────────
-void printStatus(float turbidity, bool sent) {
-  String status;
-  if      (turbidity < 30) status = "Jernih";
-  else if (turbidity < 70) status = "Keruh";
-  else                     status = "Sangat Keruh";
+// ─── Print Status ─────────────────────────────────────────────
+void printStatus(float turbidity, float ph, bool sent) {
+  String turbStatus = turbidity < 30 ? "Jernih" : turbidity < 70 ? "Keruh" : "Sangat Keruh";
+  String phStatus   = ph < 6.5 ? "Asam" : ph <= 8.5 ? "Normal" : "Basa";
 
   Serial.println("─────────────────────────────────────");
-  Serial.printf("⏱  Time      : %lu ms\n", millis());
-  Serial.printf("💧 Turbidity : %.2f NTU\n", turbidity);
-  Serial.printf("📋 Status    : %s\n", status.c_str());
-  Serial.printf("📡 Sent      : %s\n", sent ? "Yes ✅" : "No ❌");
-  Serial.printf("📶 WiFi RSSI : %d dBm\n", WiFi.RSSI());
+  Serial.printf("⏱  Time      : %lu ms\n",   millis());
+  Serial.printf("💧 Turbidity : %.2f NTU → %s\n", turbidity, turbStatus.c_str());
+  Serial.printf("🧪 pH        : %.2f     → %s\n", ph, phStatus.c_str());
+  Serial.printf("📡 Sent      : %s\n",        sent ? "Yes ✅" : "No ❌");
+  Serial.printf("📶 WiFi RSSI : %d dBm\n",    WiFi.RSSI());
   Serial.println("─────────────────────────────────────\n");
 }

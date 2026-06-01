@@ -1,7 +1,9 @@
 const db = require("../config/db");
 
+// ─── Status Helpers ───────────────────────────────────────────
+
 /**
- * Determine water status based on turbidity value (NTU)
+ * Turbidity status (NTU)
  * < 30  → Jernih
  * < 70  → Keruh
  * >= 70 → Sangat Keruh
@@ -13,14 +15,28 @@ const getWaterStatus = (turbidity) => {
 };
 
 /**
+ * pH status
+ * < 6.5  → Asam
+ * <= 8.5 → Normal
+ * > 8.5  → Basa
+ */
+const getPhStatus = (ph) => {
+  if (ph < 6.5) return "Asam";
+  if (ph <= 8.5) return "Normal";
+  return "Basa";
+};
+
+// ─── Controllers ─────────────────────────────────────────────
+
+/**
  * POST /api/water/add
- * Receive turbidity data from ESP32 and save to database
+ * Receive sensor data from ESP32 (turbidity + optional pH)
  */
 const addWaterData = async (req, res) => {
   try {
-    const { turbidity } = req.body;
+    const { turbidity, ph } = req.body;
 
-    // Validate input
+    // Validate turbidity
     if (turbidity === undefined || turbidity === null) {
       return res.status(400).json({
         success: false,
@@ -29,7 +45,6 @@ const addWaterData = async (req, res) => {
     }
 
     const turbidityValue = parseFloat(turbidity);
-
     if (isNaN(turbidityValue) || turbidityValue < 0) {
       return res.status(400).json({
         success: false,
@@ -37,12 +52,27 @@ const addWaterData = async (req, res) => {
       });
     }
 
+    // Validate pH (optional)
+    let phValue = null;
+    let phStatus = null;
+
+    if (ph !== undefined && ph !== null) {
+      phValue = parseFloat(ph);
+      if (isNaN(phValue) || phValue < 0 || phValue > 14) {
+        return res.status(400).json({
+          success: false,
+          message: "pH must be a number between 0 and 14.",
+        });
+      }
+      phStatus = getPhStatus(phValue);
+    }
+
     const status = getWaterStatus(turbidityValue);
 
     // Insert into database
     const [result] = await db.execute(
-      "INSERT INTO water_quality (turbidity, status) VALUES (?, ?)",
-      [turbidityValue, status]
+      "INSERT INTO water_quality (turbidity, ph, status, ph_status) VALUES (?, ?, ?, ?)",
+      [turbidityValue, phValue, status, phStatus]
     );
 
     // Fetch the newly created record
@@ -53,7 +83,7 @@ const addWaterData = async (req, res) => {
 
     const newData = rows[0];
 
-    // Emit realtime event via Socket.IO (attached to req.app)
+    // Emit realtime event via Socket.IO
     const io = req.app.get("io");
     if (io) {
       io.emit("water_data", newData);
@@ -75,21 +105,18 @@ const addWaterData = async (req, res) => {
 
 /**
  * GET /api/water
- * Retrieve all water quality records (latest first)
- * Supports ?limit=N and ?page=N for pagination
+ * Retrieve all water quality records (latest first) with pagination
  */
 const getWaterData = async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 50;
-    const page = parseInt(req.query.page) || 1;
+    const page  = parseInt(req.query.page)  || 1;
     const offset = (page - 1) * limit;
 
-    // Get total count
     const [[{ total }]] = await db.execute(
       "SELECT COUNT(*) AS total FROM water_quality"
     );
 
-    // Get paginated records
     const [rows] = await db.execute(
       "SELECT * FROM water_quality ORDER BY created_at DESC LIMIT ? OFFSET ?",
       [limit, offset]
@@ -107,10 +134,7 @@ const getWaterData = async (req, res) => {
     });
   } catch (error) {
     console.error("getWaterData error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error.",
-    });
+    return res.status(500).json({ success: false, message: "Internal server error." });
   }
 };
 
@@ -125,53 +149,44 @@ const getLatestData = async (req, res) => {
     );
 
     if (rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "No data found.",
-      });
+      return res.status(404).json({ success: false, message: "No data found." });
     }
 
-    return res.status(200).json({
-      success: true,
-      data: rows[0],
-    });
+    return res.status(200).json({ success: true, data: rows[0] });
   } catch (error) {
     console.error("getLatestData error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error.",
-    });
+    return res.status(500).json({ success: false, message: "Internal server error." });
   }
 };
 
 /**
  * GET /api/water/stats
- * Get summary statistics
+ * Get summary statistics for both turbidity and pH
  */
 const getStats = async (req, res) => {
   try {
     const [[stats]] = await db.execute(`
       SELECT
-        COUNT(*)                          AS total_readings,
-        ROUND(AVG(turbidity), 2)          AS avg_turbidity,
-        ROUND(MIN(turbidity), 2)          AS min_turbidity,
-        ROUND(MAX(turbidity), 2)          AS max_turbidity,
-        SUM(status = 'Jernih')            AS jernih_count,
-        SUM(status = 'Keruh')             AS keruh_count,
-        SUM(status = 'Sangat Keruh')      AS sangat_keruh_count
+        COUNT(*)                              AS total_readings,
+        ROUND(AVG(turbidity), 2)              AS avg_turbidity,
+        ROUND(MIN(turbidity), 2)              AS min_turbidity,
+        ROUND(MAX(turbidity), 2)              AS max_turbidity,
+        SUM(status = 'Jernih')                AS jernih_count,
+        SUM(status = 'Keruh')                 AS keruh_count,
+        SUM(status = 'Sangat Keruh')          AS sangat_keruh_count,
+        ROUND(AVG(ph), 2)                     AS avg_ph,
+        ROUND(MIN(ph), 2)                     AS min_ph,
+        ROUND(MAX(ph), 2)                     AS max_ph,
+        SUM(ph_status = 'Asam')               AS asam_count,
+        SUM(ph_status = 'Normal')             AS normal_count,
+        SUM(ph_status = 'Basa')               AS basa_count
       FROM water_quality
     `);
 
-    return res.status(200).json({
-      success: true,
-      data: stats,
-    });
+    return res.status(200).json({ success: true, data: stats });
   } catch (error) {
     console.error("getStats error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error.",
-    });
+    return res.status(500).json({ success: false, message: "Internal server error." });
   }
 };
 
@@ -189,22 +204,13 @@ const deleteWaterData = async (req, res) => {
     );
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Record not found.",
-      });
+      return res.status(404).json({ success: false, message: "Record not found." });
     }
 
-    return res.status(200).json({
-      success: true,
-      message: "Record deleted successfully.",
-    });
+    return res.status(200).json({ success: true, message: "Record deleted successfully." });
   } catch (error) {
     console.error("deleteWaterData error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error.",
-    });
+    return res.status(500).json({ success: false, message: "Internal server error." });
   }
 };
 
